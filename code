@@ -1,0 +1,1591 @@
+import os
+import tempfile
+import base64
+
+import pandas as pd
+import streamlit as st
+import speech_recognition as sr
+
+from gtts import gTTS
+from streamlit_mic_recorder import mic_recorder
+
+
+# ============================================================
+# CONFIGURACIÓN
+# ============================================================
+
+st.set_page_config(
+    page_title="OINK - Alcancía Inteligente",
+    page_icon="🐷",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+
+# ============================================================
+# ESTILOS
+# ============================================================
+
+st.markdown("""
+<style>
+
+.stApp {
+    background:
+        radial-gradient(
+            circle at top left,
+            #292929 0%,
+            #111111 40%,
+            #050505 100%
+        );
+    color: white;
+}
+
+[data-testid="stSidebar"] {
+    background: #101010;
+}
+
+[data-testid="stSidebar"] * {
+    color: white;
+}
+
+h1 {
+    color: #ffd21f;
+    font-weight: 800;
+}
+
+h2 {
+    color: #ffd21f;
+}
+
+h3 {
+    color: white;
+}
+
+.card {
+    background: rgba(25,25,25,0.95);
+    border: 1px solid #3c3c3c;
+    border-radius: 20px;
+    padding: 25px;
+    margin-bottom: 20px;
+    box-shadow: 0px 8px 25px rgba(0,0,0,0.3);
+}
+
+.metric-card {
+    background: linear-gradient(
+        145deg,
+        #222222,
+        #101010
+    );
+    border: 1px solid #444444;
+    border-radius: 18px;
+    padding: 20px;
+    text-align: center;
+    min-height: 120px;
+}
+
+.metric-number {
+    color: #ffd21f;
+    font-size: 30px;
+    font-weight: bold;
+}
+
+.metric-title {
+    color: #bbbbbb;
+    font-size: 14px;
+}
+
+.answer {
+    background: #181818;
+    border-left: 5px solid #ffd21f;
+    border-radius: 10px;
+    padding: 20px;
+    margin: 15px 0;
+}
+
+.language-box {
+    background: #202020;
+    border: 1px solid #444444;
+    border-radius: 12px;
+    padding: 15px;
+    margin-top: 10px;
+}
+
+</style>
+""", unsafe_allow_html=True)
+
+
+# ============================================================
+# DATOS DE EJEMPLO
+# ============================================================
+
+datos = pd.DataFrame({
+
+    "Usuario": [
+        "Ana",
+        "Carlos",
+        "Laura",
+        "Pedro",
+        "Sofia",
+        "Juan",
+        "Camila",
+        "Mateo"
+    ],
+
+    "Deposito": [
+        5000,
+        10000,
+        5000,
+        30000,
+        15000,
+        5000,
+        25000,
+        40000
+    ]
+})
+
+
+# ============================================================
+# PREPARAR DATOS
+# ============================================================
+
+def preparar_datos(df):
+
+    df = df.copy()
+
+    df["Deposito"] = pd.to_numeric(
+        df["Deposito"],
+        errors="coerce"
+    )
+
+    df = df.dropna(
+        subset=["Usuario", "Deposito"]
+    )
+
+    return df
+
+
+# ============================================================
+# ICF
+# ============================================================
+
+def calcular_icf(df):
+
+    resultados = []
+
+    for usuario, grupo in df.groupby("Usuario"):
+
+        total = grupo["Deposito"].sum()
+
+        cantidad = len(grupo)
+
+        promedio = grupo["Deposito"].mean()
+
+        # ----------------------------------------
+        # Ahorro = 40%
+        # ----------------------------------------
+
+        ahorro = min(
+            total / 40000 * 100,
+            100
+        )
+
+        # ----------------------------------------
+        # Frecuencia = 30%
+        # ----------------------------------------
+
+        frecuencia = min(
+            cantidad / 5 * 100,
+            100
+        )
+
+        # ----------------------------------------
+        # Promedio = 30%
+        # ----------------------------------------
+
+        promedio_puntos = min(
+            promedio / 20000 * 100,
+            100
+        )
+
+        # ----------------------------------------
+        # ICF
+        # ----------------------------------------
+
+        icf = (
+            ahorro * 0.40
+            + frecuencia * 0.30
+            + promedio_puntos * 0.30
+        )
+
+        # ----------------------------------------
+        # Clasificación
+        # ----------------------------------------
+
+        if icf < 40:
+
+            nivel = "Bajo"
+
+        elif icf < 70:
+
+            nivel = "Medio"
+
+        elif icf < 90:
+
+            nivel = "Alto"
+
+        else:
+
+            nivel = "Excelente"
+
+        resultados.append({
+
+            "Usuario": usuario,
+
+            "Ahorro total": total,
+
+            "Depósitos": cantidad,
+
+            "Promedio depósito": round(
+                promedio,
+                2
+            ),
+
+            "ICF": round(
+                icf,
+                2
+            ),
+
+            "Nivel": nivel
+
+        })
+
+    return pd.DataFrame(resultados)
+
+
+# ============================================================
+# DETECTAR IDIOMA
+# ============================================================
+
+def detectar_idioma(audio_bytes):
+
+    reconocedor = sr.Recognizer()
+
+    archivo = tempfile.NamedTemporaryFile(
+        delete=False,
+        suffix=".wav"
+    )
+
+    ruta = archivo.name
+
+    try:
+
+        archivo.write(audio_bytes)
+
+        archivo.close()
+
+        with sr.AudioFile(ruta) as fuente:
+
+            audio = reconocedor.record(
+                fuente
+            )
+
+        # ----------------------------------------------------
+        # Intentamos detectar el idioma probando varios.
+        # ----------------------------------------------------
+
+        idiomas = {
+
+            "es": "es-CO",
+
+            "en": "en-US",
+
+            "pt": "pt-BR",
+
+            "fr": "fr-FR",
+
+            "de": "de-DE",
+
+            "it": "it-IT"
+
+        }
+
+        resultados = []
+
+        for codigo, idioma_google in idiomas.items():
+
+            try:
+
+                texto = reconocedor.recognize_google(
+                    audio,
+                    language=idioma_google
+                )
+
+                if texto:
+
+                    resultados.append(
+                        (
+                            codigo,
+                            texto
+                        )
+                    )
+
+            except:
+
+                pass
+
+        # ----------------------------------------------------
+        # Si encontró resultados, elegimos el primero.
+        # ----------------------------------------------------
+
+        if resultados:
+
+            return resultados[0][0], resultados[0][1]
+
+        return "es", ""
+
+    except sr.UnknownValueError:
+
+        return "es", ""
+
+    except sr.RequestError:
+
+        raise Exception(
+            "No fue posible conectarse al "
+            "servicio de reconocimiento de voz."
+        )
+
+    finally:
+
+        if os.path.exists(ruta):
+
+            os.remove(ruta)
+
+
+# ============================================================
+# RESPUESTAS DEL TUTOR
+# ============================================================
+
+def responder_pregunta(pregunta, idioma):
+
+    texto = pregunta.lower().strip()
+
+    # ========================================================
+    # ESPAÑOL
+    # ========================================================
+
+    if idioma == "es":
+
+        if any(x in texto for x in [
+            "hola",
+            "buenas",
+            "hey"
+        ]):
+
+            return (
+                "Hola. Soy el tutor virtual de OINK. "
+                "Puedo explicarte el ICF, el ahorro, "
+                "los depósitos, las bases de datos, "
+                "el Internet de las Cosas, Python "
+                "y Streamlit."
+            )
+
+        if (
+            "icf" in texto
+            or "comportamiento financiero" in texto
+        ):
+
+            return (
+                "El ICF significa Índice de Comportamiento "
+                "Financiero. En este proyecto combina "
+                "tres componentes: ahorro total con un "
+                "peso del 40 por ciento, frecuencia de "
+                "depósitos con un 30 por ciento y promedio "
+                "de depósitos con otro 30 por ciento."
+            )
+
+        if "ahorro" in texto:
+
+            return (
+                "El ahorro consiste en reservar una parte "
+                "del dinero para utilizarla posteriormente. "
+                "En OINK se registran los depósitos para "
+                "analizar los hábitos de ahorro."
+            )
+
+        if (
+            "deposito" in texto
+            or "depósito" in texto
+            or "depositos" in texto
+            or "depósitos" in texto
+        ):
+
+            return (
+                "Los depósitos son las cantidades de dinero "
+                "que el usuario introduce en la alcancía. "
+                "OINK registra estos valores para analizarlos."
+            )
+
+        if "base de datos" in texto:
+
+            return (
+                "Una base de datos permite almacenar y "
+                "organizar información. En OINK puede "
+                "utilizarse para guardar usuarios, depósitos, "
+                "fechas y resultados del ICF."
+            )
+
+        if (
+            "iot" in texto
+            or "internet de las cosas" in texto
+        ):
+
+            return (
+                "IoT significa Internet de las Cosas. "
+                "En OINK permite conectar la alcancía "
+                "física con sistemas digitales para "
+                "registrar información."
+            )
+
+        if "python" in texto:
+
+            return (
+                "Python es el lenguaje de programación "
+                "utilizado en OINK para procesar datos, "
+                "calcular el ICF y desarrollar funciones "
+                "del sistema."
+            )
+
+        if "streamlit" in texto:
+
+            return (
+                "Streamlit es una herramienta de Python "
+                "que permite crear aplicaciones web "
+                "interactivas. En OINK se utiliza para "
+                "crear este dashboard."
+            )
+
+        return (
+            "Todavía no tengo una respuesta específica "
+            "para esa pregunta. Puedes preguntarme por "
+            "el ICF, ahorro, depósitos, IoT, Python "
+            "o bases de datos."
+        )
+
+    # ========================================================
+    # INGLÉS
+    # ========================================================
+
+    elif idioma == "en":
+
+        if any(x in texto for x in [
+            "hello",
+            "hi",
+            "hey"
+        ]):
+
+            return (
+                "Hello. I am the OINK virtual tutor. "
+                "I can explain the Financial Behavior Index, "
+                "saving, deposits, databases, IoT, Python "
+                "and Streamlit."
+            )
+
+        if (
+            "icf" in texto
+            or "financial behavior" in texto
+        ):
+
+            return (
+                "ICF stands for Financial Behavior Index. "
+                "In this project it combines three components: "
+                "total savings with a forty percent weight, "
+                "deposit frequency with thirty percent, "
+                "and average deposits with another thirty percent."
+            )
+
+        if "saving" in texto:
+
+            return (
+                "Saving means keeping part of your money "
+                "for future use. OINK records deposits "
+                "to analyze saving habits."
+            )
+
+        if (
+            "deposit" in texto
+            or "deposits" in texto
+        ):
+
+            return (
+                "Deposits are the amounts of money that "
+                "the user puts into the smart piggy bank. "
+                "OINK records these values for analysis."
+            )
+
+        if "database" in texto:
+
+            return (
+                "A database stores and organizes information. "
+                "In OINK it can store users, deposits, dates "
+                "and Financial Behavior Index results."
+            )
+
+        if (
+            "iot" in texto
+            or "internet of things" in texto
+        ):
+
+            return (
+                "IoT means Internet of Things. In OINK it "
+                "allows the physical piggy bank to connect "
+                "with digital systems and send information."
+            )
+
+        if "python" in texto:
+
+            return (
+                "Python is the programming language used "
+                "in OINK to process data, calculate the "
+                "Financial Behavior Index and develop "
+                "system functions."
+            )
+
+        if "streamlit" in texto:
+
+            return (
+                "Streamlit is a Python tool for creating "
+                "interactive web applications. OINK uses "
+                "it to build this dashboard."
+            )
+
+        return (
+            "I do not have a specific answer for that "
+            "question yet. You can ask me about the ICF, "
+            "saving, deposits, IoT, Python or databases."
+        )
+
+    # ========================================================
+    # PORTUGUÉS
+    # ========================================================
+
+    elif idioma == "pt":
+
+        if any(x in texto for x in [
+            "olá",
+            "ola",
+            "oi"
+        ]):
+
+            return (
+                "Olá. Sou o tutor virtual da OINK. "
+                "Posso explicar o ICF, economia, depósitos, "
+                "bancos de dados, IoT, Python e Streamlit."
+            )
+
+        if "icf" in texto:
+
+            return (
+                "O ICF significa Índice de Comportamento "
+                "Financeiro. Neste projeto ele combina "
+                "poupança total, frequência de depósitos "
+                "e média dos depósitos."
+            )
+
+        if (
+            "economia" in texto
+            or "poupança" in texto
+            or "poupanca" in texto
+        ):
+
+            return (
+                "Poupar significa guardar uma parte do "
+                "dinheiro para utilizá-lo no futuro. "
+                "A OINK registra os depósitos para analisar "
+                "os hábitos de poupança."
+            )
+
+        if (
+            "depósito" in texto
+            or "deposito" in texto
+        ):
+
+            return (
+                "Os depósitos são as quantias de dinheiro "
+                "colocadas pelo usuário no cofrinho inteligente."
+            )
+
+        if (
+            "banco de dados" in texto
+            or "base de dados" in texto
+        ):
+
+            return (
+                "Um banco de dados permite armazenar e "
+                "organizar informações. Na OINK ele pode "
+                "armazenar usuários, depósitos e resultados."
+            )
+
+        if (
+            "iot" in texto
+            or "internet das coisas" in texto
+        ):
+
+            return (
+                "IoT significa Internet das Coisas. "
+                "Na OINK permite conectar o cofrinho físico "
+                "com sistemas digitais."
+            )
+
+        return (
+            "Ainda não tenho uma resposta específica "
+            "para essa pergunta. Você pode perguntar "
+            "sobre ICF, poupança, depósitos, IoT ou Python."
+        )
+
+    # ========================================================
+    # FRANCÉS
+    # ========================================================
+
+    elif idioma == "fr":
+
+        if any(x in texto for x in [
+            "bonjour",
+            "salut"
+        ]):
+
+            return (
+                "Bonjour. Je suis le tuteur virtuel d'OINK. "
+                "Je peux expliquer l'ICF, l'épargne, les dépôts, "
+                "les bases de données, l'IoT, Python et Streamlit."
+            )
+
+        if "icf" in texto:
+
+            return (
+                "L'ICF signifie Indice de Comportement Financier. "
+                "Dans ce projet, il combine l'épargne totale, "
+                "la fréquence des dépôts et la moyenne des dépôts."
+            )
+
+        if (
+            "épargne" in texto
+            or "epargne" in texto
+        ):
+
+            return (
+                "Épargner signifie mettre de côté une partie "
+                "de son argent pour une utilisation future. "
+                "OINK enregistre les dépôts pour analyser "
+                "les habitudes d'épargne."
+            )
+
+        if "dépôt" in texto or "depôt" in texto:
+
+            return (
+                "Les dépôts sont les sommes d'argent placées "
+                "dans la tirelire intelligente."
+            )
+
+        if "base de données" in texto:
+
+            return (
+                "Une base de données permet de stocker et "
+                "d'organiser des informations. OINK peut y "
+                "stocker les utilisateurs et les dépôts."
+            )
+
+        return (
+            "Je n'ai pas encore une réponse précise à cette "
+            "question. Vous pouvez me demander des informations "
+            "sur l'ICF, l'épargne, les dépôts ou l'IoT."
+        )
+
+    # ========================================================
+    # ALEMÁN
+    # ========================================================
+
+    elif idioma == "de":
+
+        if any(x in texto for x in [
+            "hallo",
+            "guten tag"
+        ]):
+
+            return (
+                "Hallo. Ich bin der virtuelle OINK-Tutor. "
+                "Ich kann den ICF, Sparen, Einzahlungen, "
+                "Datenbanken, IoT, Python und Streamlit erklären."
+            )
+
+        if "icf" in texto:
+
+            return (
+                "ICF steht für Finanzverhaltensindex. "
+                "In diesem Projekt kombiniert er die gesamten "
+                "Ersparnisse, die Einzahlungshäufigkeit "
+                "und den durchschnittlichen Einzahlungsbetrag."
+            )
+
+        if (
+            "sparen" in texto
+            or "ersparnis" in texto
+        ):
+
+            return (
+                "Sparen bedeutet, einen Teil des Geldes "
+                "für die zukünftige Verwendung zurückzulegen."
+            )
+
+        if "einzahlung" in texto:
+
+            return (
+                "Einzahlungen sind die Geldbeträge, die "
+                "der Benutzer in das intelligente Sparschwein einzahlt."
+            )
+
+        if "datenbank" in texto:
+
+            return (
+                "Eine Datenbank speichert und organisiert "
+                "Informationen. OINK kann dort Benutzer, "
+                "Einzahlungen und Ergebnisse speichern."
+            )
+
+        return (
+            "Ich habe noch keine genaue Antwort auf diese "
+            "Frage. Du kannst mich über ICF, Sparen, "
+            "Einzahlungen, IoT oder Python fragen."
+        )
+
+    # ========================================================
+    # ITALIANO
+    # ========================================================
+
+    elif idioma == "it":
+
+        if any(x in texto for x in [
+            "ciao",
+            "buongiorno"
+        ]):
+
+            return (
+                "Ciao. Sono il tutor virtuale di OINK. "
+                "Posso spiegare l'ICF, il risparmio, "
+                "i depositi, i database, IoT, Python e Streamlit."
+            )
+
+        if "icf" in texto:
+
+            return (
+                "ICF significa Indice di Comportamento Finanziario. "
+                "In questo progetto combina il risparmio totale, "
+                "la frequenza dei depositi e la media dei depositi."
+            )
+
+        if (
+            "risparmio" in texto
+            or "risparmi" in texto
+        ):
+
+            return (
+                "Risparmiare significa mettere da parte "
+                "una parte del denaro per utilizzarlo in futuro."
+            )
+
+        if "deposito" in texto:
+
+            return (
+                "I depositi sono le somme di denaro inserite "
+                "dall'utente nel salvadanaio intelligente."
+            )
+
+        if "database" in texto:
+
+            return (
+                "Un database permette di memorizzare e "
+                "organizzare informazioni. OINK può utilizzarlo "
+                "per conservare utenti e depositi."
+            )
+
+        return (
+            "Non ho ancora una risposta specifica a questa "
+            "domanda. Puoi chiedermi informazioni su ICF, "
+            "risparmio, depositi, IoT o Python."
+        )
+
+    # ========================================================
+    # IDIOMA DESCONOCIDO
+    # ========================================================
+
+    return (
+        "No pude identificar completamente el idioma "
+        "de la pregunta."
+    )
+
+
+# ============================================================
+# GENERAR AUDIO EN EL MISMO IDIOMA
+# ============================================================
+
+def generar_audio(texto, idioma):
+
+    idiomas_gtts = {
+
+        "es": "es",
+
+        "en": "en",
+
+        "pt": "pt",
+
+        "fr": "fr",
+
+        "de": "de",
+
+        "it": "it"
+
+    }
+
+    idioma_tts = idiomas_gtts.get(
+        idioma,
+        "es"
+    )
+
+    archivo = tempfile.NamedTemporaryFile(
+        delete=False,
+        suffix=".mp3"
+    )
+
+    ruta = archivo.name
+
+    archivo.close()
+
+    try:
+
+        tts = gTTS(
+            text=texto,
+            lang=idioma_tts,
+            slow=False
+        )
+
+        tts.save(ruta)
+
+        with open(
+            ruta,
+            "rb"
+        ) as f:
+
+            return f.read()
+
+    finally:
+
+        if os.path.exists(ruta):
+
+            os.remove(ruta)
+
+
+# ============================================================
+# REPRODUCIR AUDIO
+# ============================================================
+
+def reproducir_audio(audio_bytes):
+
+    audio_base64 = base64.b64encode(
+        audio_bytes
+    ).decode()
+
+    html = f"""
+    <audio controls autoplay style="width:100%;">
+        <source
+            src="data:audio/mp3;base64,{audio_base64}"
+            type="audio/mp3"
+        >
+    </audio>
+    """
+
+    st.markdown(
+        html,
+        unsafe_allow_html=True
+    )
+
+
+# ============================================================
+# ENCABEZADO
+# ============================================================
+
+st.markdown(
+    """
+    <div class="card">
+
+    <h1>🐷 OINK</h1>
+
+    <h3>
+    Alcancía inteligente y comportamiento financiero
+    </h3>
+
+    <p>
+    Sistema de análisis de ahorro basado en programación,
+    datos e Internet de las Cosas.
+    </p>
+
+    </div>
+    """,
+    unsafe_allow_html=True
+)
+
+
+# ============================================================
+# MENÚ
+# ============================================================
+
+st.sidebar.title("🐷 OINK")
+
+pagina = st.sidebar.radio(
+    "Selecciona una sección:",
+    [
+        "🏠 Inicio",
+        "📊 Dashboard",
+        "🧠 ICF",
+        "🎤 Tutor de Voz"
+    ]
+)
+
+st.sidebar.markdown("---")
+
+st.sidebar.info(
+    "El tutor puede detectar varios idiomas "
+    "y responder en el idioma detectado."
+)
+
+
+# ============================================================
+# INICIO
+# ============================================================
+
+if pagina == "🏠 Inicio":
+
+    st.header("🏠 Bienvenido a OINK")
+
+    st.markdown(
+        """
+        <div class="card">
+
+        <h2>🐷 ¿Qué es OINK?</h2>
+
+        <p>
+        OINK es una propuesta de alcancía inteligente
+        que permite registrar los depósitos realizados
+        por los usuarios.
+        </p>
+
+        <p>
+        Los datos pueden analizarse para conocer los
+        hábitos de ahorro mediante el ICF.
+        </p>
+
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+
+        st.markdown(
+            """
+            <div class="metric-card">
+
+            <div class="metric-number">
+            🐷
+            </div>
+
+            <div class="metric-title">
+            Alcancía inteligente
+            </div>
+
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+    with col2:
+
+        st.markdown(
+            """
+            <div class="metric-card">
+
+            <div class="metric-number">
+            📊
+            </div>
+
+            <div class="metric-title">
+            Análisis de datos
+            </div>
+
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+    with col3:
+
+        st.markdown(
+            """
+            <div class="metric-card">
+
+            <div class="metric-number">
+            🌎
+            </div>
+
+            <div class="metric-title">
+            Multilingüe
+            </div>
+
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+    st.subheader("🔄 Funcionamiento")
+
+    st.write(
+        "1️⃣ Registrar los depósitos."
+    )
+
+    st.write(
+        "2️⃣ Almacenar los datos."
+    )
+
+    st.write(
+        "3️⃣ Analizar la información."
+    )
+
+    st.write(
+        "4️⃣ Calcular el ICF."
+    )
+
+    st.write(
+        "5️⃣ Consultar al tutor de voz."
+    )
+
+
+# ============================================================
+# DASHBOARD
+# ============================================================
+
+elif pagina == "📊 Dashboard":
+
+    st.header("📊 Dashboard financiero")
+
+    archivo = st.file_uploader(
+        "📂 Cargar archivo CSV",
+        type=["csv"]
+    )
+
+    if archivo:
+
+        try:
+
+            df = pd.read_csv(
+                archivo
+            )
+
+            if (
+                "Usuario" not in df.columns
+                or "Deposito" not in df.columns
+            ):
+
+                st.error(
+                    "El CSV debe contener las columnas "
+                    "'Usuario' y 'Deposito'."
+                )
+
+                df = datos.copy()
+
+            else:
+
+                df = preparar_datos(
+                    df
+                )
+
+        except Exception:
+
+            st.error(
+                "No se pudo leer el archivo."
+            )
+
+            df = datos.copy()
+
+    else:
+
+        df = datos.copy()
+
+    total = df["Deposito"].sum()
+
+    cantidad = len(df)
+
+    usuarios = df["Usuario"].nunique()
+
+    promedio = df["Deposito"].mean()
+
+    col1, col2, col3, col4 = st.columns(4)
+
+    with col1:
+
+        st.metric(
+            "💰 Ahorro total",
+            f"${total:,.0f}"
+        )
+
+    with col2:
+
+        st.metric(
+            "💵 Depósitos",
+            cantidad
+        )
+
+    with col3:
+
+        st.metric(
+            "👥 Usuarios",
+            usuarios
+        )
+
+    with col4:
+
+        st.metric(
+            "📊 Promedio",
+            f"${promedio:,.0f}"
+        )
+
+    st.markdown("---")
+
+    st.subheader(
+        "📋 Registro de depósitos"
+    )
+
+    st.dataframe(
+        df,
+        use_container_width=True,
+        hide_index=True
+    )
+
+    st.subheader(
+        "📊 Ahorro por usuario"
+    )
+
+    resumen = (
+        df.groupby("Usuario")["Deposito"]
+        .sum()
+        .sort_values(
+            ascending=False
+        )
+    )
+
+    st.bar_chart(
+        resumen
+    )
+
+    st.subheader(
+        "📈 Frecuencia de depósitos"
+    )
+
+    frecuencia = (
+        df.groupby("Usuario")
+        .size()
+        .sort_values(
+            ascending=False
+        )
+    )
+
+    st.bar_chart(
+        frecuencia
+    )
+
+
+# ============================================================
+# ICF
+# ============================================================
+
+elif pagina == "🧠 ICF":
+
+    st.header(
+        "🧠 Índice de Comportamiento Financiero"
+    )
+
+    st.markdown(
+        """
+        <div class="card">
+
+        <h3>📐 Fórmula del ICF</h3>
+
+        <p>
+        El indicador utilizado en este proyecto combina:
+        </p>
+
+        <p>
+        💰 Ahorro total → 40%
+        </p>
+
+        <p>
+        🔄 Frecuencia de depósitos → 30%
+        </p>
+
+        <p>
+        💵 Promedio de depósitos → 30%
+        </p>
+
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+    st.latex(
+        r"""
+        ICF =
+        (Ahorro \times 0.40)
+        +
+        (Frecuencia \times 0.30)
+        +
+        (Promedio \times 0.30)
+        """
+    )
+
+    resultados = calcular_icf(
+        datos
+    )
+
+    st.subheader(
+        "📋 Resultados del ICF"
+    )
+
+    st.dataframe(
+        resultados,
+        use_container_width=True,
+        hide_index=True
+    )
+
+    st.subheader(
+        "📊 ICF por usuario"
+    )
+
+    grafico = resultados.set_index(
+        "Usuario"
+    )["ICF"]
+
+    st.bar_chart(
+        grafico
+    )
+
+    st.subheader(
+        "📚 Clasificación"
+    )
+
+    st.write(
+        "🔴 Menor de 40 → Bajo"
+    )
+
+    st.write(
+        "🟠 40 a 69 → Medio"
+    )
+
+    st.write(
+        "🟢 70 a 89 → Alto"
+    )
+
+    st.write(
+        "🔵 90 a 100 → Excelente"
+    )
+
+
+# ============================================================
+# TUTOR DE VOZ
+# ============================================================
+
+elif pagina == "🎤 Tutor de Voz":
+
+    st.header(
+        "🎤 Tutor Virtual OINK"
+    )
+
+    st.markdown(
+        """
+        <div class="card">
+
+        <h2>🗣️ Habla con OINK</h2>
+
+        <p>
+        Habla en el idioma que quieras. OINK intentará
+        detectar el idioma, responder en ese idioma
+        y generar el audio en el mismo idioma.
+        </p>
+
+        <p>
+        Idiomas disponibles:
+        🇪🇸 Español · 🇺🇸 Inglés · 🇧🇷 Portugués ·
+        🇫🇷 Francés · 🇩🇪 Alemán · 🇮🇹 Italiano
+        </p>
+
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+    audio = mic_recorder(
+
+        start_prompt="🎤 Comenzar a hablar",
+
+        stop_prompt="⏹️ Terminar grabación",
+
+        just_once=True,
+
+        use_container_width=True,
+
+        format="wav",
+
+        key="oink_microfono"
+
+    )
+
+    if audio:
+
+        audio_bytes = audio["bytes"]
+
+        st.success(
+            "🎙️ Grabación recibida."
+        )
+
+        with st.spinner(
+            "🌎 Detectando idioma y reconociendo voz..."
+        ):
+
+            try:
+
+                idioma, texto = detectar_idioma(
+                    audio_bytes
+                )
+
+                if texto:
+
+                    nombres_idiomas = {
+
+                        "es": "🇪🇸 Español",
+
+                        "en": "🇺🇸 Inglés",
+
+                        "pt": "🇧🇷 Portugués",
+
+                        "fr": "🇫🇷 Francés",
+
+                        "de": "🇩🇪 Alemán",
+
+                        "it": "🇮🇹 Italiano"
+
+                    }
+
+                    nombre_idioma = nombres_idiomas.get(
+                        idioma,
+                        "Idioma desconocido"
+                    )
+
+                    st.markdown(
+                        f"""
+                        <div class="language-box">
+
+                        🌎 <b>Idioma detectado:</b>
+                        {nombre_idioma}
+
+                        </div>
+                        """,
+                        unsafe_allow_html=True
+                    )
+
+                    st.subheader(
+                        "🗣️ Tú dijiste:"
+                    )
+
+                    st.info(
+                        texto
+                    )
+
+                    respuesta = responder_pregunta(
+                        texto,
+                        idioma
+                    )
+
+                    st.subheader(
+                        "🐷 Respuesta de OINK:"
+                    )
+
+                    st.markdown(
+                        f"""
+                        <div class="answer">
+
+                        {respuesta}
+
+                        </div>
+                        """,
+                        unsafe_allow_html=True
+                    )
+
+                    # --------------------------------------------
+                    # AUDIO EN EL MISMO IDIOMA
+                    # --------------------------------------------
+
+                    with st.spinner(
+                        "🔊 Generando respuesta en el mismo idioma..."
+                    ):
+
+                        audio_respuesta = generar_audio(
+                            respuesta,
+                            idioma
+                        )
+
+                    st.subheader(
+                        "🔊 Respuesta hablada:"
+                    )
+
+                    reproducir_audio(
+                        audio_respuesta
+                    )
+
+                else:
+
+                    st.warning(
+                        "No pude entender el audio. "
+                        "Habla un poco más cerca del micrófono "
+                        "y vuelve a intentarlo."
+                    )
+
+            except sr.RequestError:
+
+                st.error(
+                    "❌ No se pudo conectar al servicio "
+                    "de reconocimiento de voz. "
+                    "Comprueba tu conexión a Internet."
+                )
+
+            except Exception as error:
+
+                st.error(
+                    f"❌ Error: {error}"
+                )
+
+    # ========================================================
+    # PREGUNTA ESCRITA
+    # ========================================================
+
+    st.markdown("---")
+
+    st.subheader(
+        "⌨️ También puedes escribir"
+    )
+
+    pregunta = st.text_input(
+        "Escribe tu pregunta:"
+    )
+
+    idioma_escrito = st.selectbox(
+        "🌎 Selecciona el idioma de respuesta:",
+        [
+            "Español",
+            "English",
+            "Português",
+            "Français",
+            "Deutsch",
+            "Italiano"
+        ]
+    )
+
+    mapa_idiomas = {
+
+        "Español": "es",
+
+        "English": "en",
+
+        "Português": "pt",
+
+        "Français": "fr",
+
+        "Deutsch": "de",
+
+        "Italiano": "it"
+
+    }
+
+    if st.button(
+        "💬 Preguntar"
+    ):
+
+        if pregunta.strip():
+
+            idioma = mapa_idiomas[
+                idioma_escrito
+            ]
+
+            respuesta = responder_pregunta(
+                pregunta,
+                idioma
+            )
+
+            st.subheader(
+                "🐷 Respuesta:"
+            )
+
+            st.markdown(
+                f"""
+                <div class="answer">
+
+                {respuesta}
+
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+
+            try:
+
+                audio_respuesta = generar_audio(
+                    respuesta,
+                    idioma
+                )
+
+                st.subheader(
+                    "🔊 Respuesta hablada:"
+                )
+
+                reproducir_audio(
+                    audio_respuesta
+                )
+
+            except Exception as error:
+
+                st.warning(
+                    f"No se pudo generar el audio: {error}"
+                )
+
+        else:
+
+            st.warning(
+                "Escribe una pregunta primero."
+            )
+
+
+# ============================================================
+# PIE DE PÁGINA
+# ============================================================
+
+st.markdown("---")
+
+st.markdown(
+    """
+    <div style="text-align:center;color:#777;">
+
+    🐷 OINK — Alcancía Inteligente<br>
+    Python • Streamlit • IoT • Bases de datos • ICF<br>
+    🌎 Tutor multilingüe
+
+    </div>
+    """,
+    unsafe_allow_html=True
+)
